@@ -4,11 +4,14 @@
 const CACHE_NAME = 'chat-camp-cache-v1';
 
 // These are the files we want to save for offline use (the "App Shell")
+// service-worker.js
+
 const urlsToCache = [
-  '/', // This represents the main index.html file
+  '/',
+  '/index.html',
   '/manifest.json',
-  '/icon.png'
-  // Note: We don't cache index.js or package.json as those are server-side
+  '/icon.png',
+  '/socket.io/socket.io.js'
 ];
 
 // Event: The service worker is being installed
