@@ -9,10 +9,11 @@ const PORT = process.env.PORT || 3000;
 
 // This is YOUR list of approved events.
 const approvedEvents = [
-    "WebDev Class 101",
-    "Monday Review",
-    "Project Alpha Kick-off",
-    "General Student Chat"
+    "website developers class",
+    "coding Army's class",
+    "app creators class",
+    "General Student Chat",
+    "chat with never hide privately",
 ];
 
 app.get('/', (req, res) => {
