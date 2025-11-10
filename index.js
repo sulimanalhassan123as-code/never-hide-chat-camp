@@ -1,4 +1,4 @@
-// index.js (The Server Engine)
+// index.js (Version with Security - Approved Events List)
 const express = require('express');
 const http = require('http');
 const app = express();
@@ -7,7 +7,18 @@ const { Server } = require("socket.io");
 const io = new Server(server);
 const PORT = process.env.PORT || 3000;
 
-// This line serves the single HTML file as our website
+// --- SECURITY UPGRADE START ---
+// This is YOUR list of approved events. 
+// ONLY events with these exact names will be allowed.
+const approvedEvents = [
+    "website developers",
+    "coding army class",
+    "have a conversation with never",
+    "General Student Chat"
+];
+// You can add or remove any names from this list!
+// --- SECURITY UPGRADE END ---
+
 app.get('/', (req, res) => {
   res.sendFile(__dirname + '/index.html');
 });
@@ -15,47 +26,43 @@ app.get('/', (req, res) => {
 const rooms = {};
 
 io.on('connection', (socket) => {
-  // When a user joins a room
   socket.on('join room', ({ username, room }) => {
-    socket.join(room); // The command to put a user in a room
-    socket.username = username;
-    socket.room = room;
-
-    if (!rooms[room]) {
-        rooms[room] = [];
-    }
-    rooms[room].push(username);
-
-    // Send a welcome message to the user who just joined
-    socket.emit('system message', `Welcome to the '${room}' event!`);
     
-    // Tell everyone ELSE in the room that a new person has joined
-    socket.to(room).emit('system message', `${username} has joined the event.`);
+    // --- SECURITY CHECK ---
+    // The server now CHECKS if the requested room is on your approved list.
+    if (approvedEvents.includes(room)) {
+        // If it's approved, let them in.
+        socket.join(room);
+        socket.username = username;
+        socket.room = room;
 
-    // Send the updated user list to EVERYONE in that room
-    io.to(room).emit('update users', rooms[room]);
+        if (!rooms[room]) {
+            rooms[room] = [];
+        }
+        rooms[room].push(username);
+
+        socket.emit('system message', `Welcome to the '${room}' event!`);
+        socket.to(room).emit('system message', `${username} has joined the event.`);
+        io.to(room).emit('update users', rooms[room]);
+
+    } else {
+        // If the event name is NOT on your list, REJECT them.
+        socket.emit('join error', 'This event does not exist. Please check the event name.');
+    }
+    // --- END OF SECURITY CHECK ---
   });
 
-  // When a user sends a chat message
   socket.on('chat message', ({ username, room, message }) => {
-    // Send the message only to users in that specific room
     io.to(room).emit('chat message', { username, message });
   });
 
-  // When a user disconnects
   socket.on('disconnect', () => {
     if (socket.username && socket.room) {
         const room = socket.room;
         const username = socket.username;
-        
-        // Remove user from our list
         if (rooms[room]) {
             rooms[room] = rooms[room].filter(user => user !== username);
-            
-            // Tell everyone in the room that the person has left
             io.to(room).emit('system message', `${username} has left the event.`);
-            
-            // Send the updated user list to everyone in that room
             io.to(room).emit('update users', rooms[room]);
         }
     }
@@ -63,5 +70,5 @@ io.on('connection', (socket) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`Server with event rooms is running on port ${PORT}`);
+  console.log(`Secure server with event list is running on port ${PORT}`);
 });
