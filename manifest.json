@@ -1,0 +1,16 @@
+{
+  "name": "NEVER HIDE chat Camp",
+  "short_name": "Chat Camp",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#f0f2f5",
+  "theme_color": "#005c4b",
+  "description": "A real-time event chat application.",
+  "icons": [
+    {
+      "src": "icon.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
