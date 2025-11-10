@@ -1,4 +1,4 @@
-// index.js (Version with Pro Features: Timestamps, Online & Typing Status)
+// index.js (Version with Welcome Message)
 const express = require('express');
 const http = require('http');
 const app = express();
@@ -9,19 +9,16 @@ const PORT = process.env.PORT || 3000;
 
 // This is YOUR list of approved events.
 const approvedEvents = [
-    "website developers class",
     "coding Army's class",
     "app creators class",
-    "General Student Chat",
     "never hide chat room privately",
+    "General Student Chat"
+];
 
 app.get('/', (req, res) => {
   res.sendFile(__dirname + '/index.html');
 });
 
-// --- FEATURE UPGRADE: We now store more user data ---
-// Instead of just a list of names, we store objects with name and status.
-// rooms = { "WebDev Class 101": [ {id: "socketid1", name: "Sulley", status: "online"} ] }
 const rooms = {};
 
 io.on('connection', (socket) => {
@@ -34,11 +31,15 @@ io.on('connection', (socket) => {
         if (!rooms[room]) {
             rooms[room] = [];
         }
-        // Add the new user with their details
         rooms[room].push({ id: socket.id, name: username, status: 'online' });
 
-        socket.emit('system message', { text: `Welcome to the '${room}' event!`, time: new Date().toLocaleTimeString() });
+        // --- NEW FEATURE: Private Welcome Message ---
+        // Send a private welcome message ONLY to the user who just connected.
+        socket.emit('system message', { text: `Welcome, ${username}! You have joined the '${room}' event.`, time: new Date().toLocaleTimeString() });
+        
+        // Send a public message to EVERYONE ELSE in the room.
         socket.to(room).emit('system message', { text: `${username} has joined the event.`, time: new Date().toLocaleTimeString() });
+        
         io.to(room).emit('update users', rooms[room]);
 
     } else {
@@ -46,19 +47,15 @@ io.on('connection', (socket) => {
     }
   });
 
-  // --- FEATURE UPGRADE: Handle typing events ---
   socket.on('typing', ({ room, username }) => {
-    // Find the user in the room and update their status
     if(rooms[room]) {
         const user = rooms[room].find(u => u.name === username);
         if (user) user.status = 'typing...';
-        // Send the updated list to everyone in the room
         io.to(room).emit('update users', rooms[room]);
     }
   });
 
   socket.on('stop typing', ({ room, username }) => {
-    // Find the user and change their status back to 'online'
     if(rooms[room]) {
         const user = rooms[room].find(u => u.name === username);
         if (user) user.status = 'online';
@@ -67,7 +64,6 @@ io.on('connection', (socket) => {
   });
 
   socket.on('chat message', ({ username, room, message }) => {
-    // --- FEATURE UPGRADE: Add a timestamp to every message ---
     const timestamp = new Date().toLocaleTimeString();
     io.to(room).emit('chat message', { username, message, time: timestamp });
   });
@@ -77,9 +73,7 @@ io.on('connection', (socket) => {
         const room = socket.room;
         const username = socket.username;
         if (rooms[room]) {
-            // Remove user from our list
             rooms[room] = rooms[room].filter(user => user.id !== socket.id);
-            
             io.to(room).emit('system message', { text: `${username} has left the event.`, time: new Date().toLocaleTimeString() });
             io.to(room).emit('update users', rooms[room]);
         }
@@ -88,5 +82,5 @@ io.on('connection', (socket) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`Pro server is running on port ${PORT}`);
+  console.log(`Pro server with Welcome Message is running on port ${PORT}`);
 });
