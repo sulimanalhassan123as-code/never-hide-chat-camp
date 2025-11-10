@@ -13,8 +13,7 @@ const approvedEvents = [
     "coding Army's class",
     "app creators class",
     "General Student Chat",
-    "chat with never hide privately",
-];
+    "never hide chat room privately",
 
 app.get('/', (req, res) => {
   res.sendFile(__dirname + '/index.html');
