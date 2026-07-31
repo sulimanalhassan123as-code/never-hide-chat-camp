@@ -1,14 +1,15 @@
 {
   "name": "never-hide-chat-camp",
-  "version": "2.0.0",
-  "description": "Never Hide Chat Camp — Connect with Ghana Cyber directly. Telegram-integrated live chat.",
+  "version": "3.0.0",
+  "description": "Never Hide Chat Camp — Premium event-based chat platform by Ghana Cyber",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
     "express": "^4.18.2",
-    "socket.io": "^4.7.2"
+    "socket.io": "^4.7.2",
+    "node-fetch": "^3.3.2"
   },
   "engines": {
     "node": ">=18.0.0"
