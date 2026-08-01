@@ -1,4 +1,4 @@
-// Never Hide Chat Camp v3.2 — Long Polling Mode (more reliable on Render)
+// Never Hide Chat Camp v3.2.1 — Long Polling Mode
 const express = require('express');
 const http = require('http');
 const app = express();
@@ -12,7 +12,6 @@ const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 const GROQ_API = 'https://api.groq.com/openai/v1/chat/completions';
 
-// ===== STATE =====
 let ADMIN_CHAT_ID = null;
 let aiMode = false;
 let aiPersonality = `You are the assistant for "Never Hide Chat Camp", a premium live chat platform run by Ghana Cyber. You are friendly, warm, and casual. You greet people, answer questions about the platform, keep conversations going, and represent Ghana Cyber when he's away. Keep replies short (1-3 sentences), use occasional emojis, and be engaging. If someone asks something you don't know, say Ghana Cyber will get back to them soon.`;
@@ -25,7 +24,6 @@ const sessions = {};
 const pendingActions = {};
 let requestCounter = 0;
 const bannedNames = new Set();
-let polling = true;
 let lastUpdateId = 0;
 
 const defaultRooms = [
@@ -38,14 +36,13 @@ defaultRooms.forEach(r => { rooms[r.id] = { ...r, approved: true, memberCount: 0
 // ===== TG HELPERS =====
 async function tgSend(chatId, text, extra = {}) {
   try {
-    const body = { chat_id: chatId, text, parse_mode: 'HTML', ...extra };
     const res = await fetch(`${TELEGRAM_API}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
+      body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML', ...extra })
     });
     const data = await res.json();
-    if (!data.ok) console.error('TG send failed:', data.description);
+    if (!data.ok) console.error('TG send failed:', data.description, '| chatId:', chatId);
     return data;
   } catch (e) { console.error('TG send error:', e.message); return null; }
 }
@@ -70,14 +67,14 @@ async function tgEdit(chatId, messageId, text) {
 
 // ===== GROQ AI =====
 async function getAIReply(roomName, senderName, message) {
-  if (!GROQ_API_KEY) return "I'd love to chat but my AI brain isn't configured yet. Ghana Cyber will be back soon! 🔧";
+  if (!GROQ_API_KEY) return "I'd love to chat but my AI brain isn't configured. Ghana Cyber will be back! 🔧";
   if (!aiConversations[roomName]) aiConversations[roomName] = [];
   const history = aiConversations[roomName];
   history.push({ role: 'user', content: `${senderName}: ${message}` });
   while (history.length > MAX_AI_HISTORY * 2) history.shift();
 
   const messages = [
-    { role: 'system', content: aiPersonality + ` You are in the room "${roomName}". Reply naturally without prefixing names.` },
+    { role: 'system', content: aiPersonality + ` You are in room "${roomName}". Reply naturally.` },
     ...history.map(h => ({ role: h.role === 'user' ? 'user' : 'assistant', content: h.content }))
   ];
 
@@ -94,22 +91,32 @@ async function getAIReply(roomName, senderName, message) {
     return reply;
   } catch (e) {
     console.error('Groq error:', e.message);
-    return "I'm having trouble right now. Ghana Cyber will be back soon! 🧠";
+    return "I'm having trouble right now. Ghana Cyber will be back! 🧠";
   }
 }
 
 // ===== LONG POLLING =====
 async function pollTelegram() {
   console.log('📡 Starting Telegram long polling...');
-  // Delete any existing webhook first
+  
+  // Delete webhook first
   try {
-    await fetch(`${TELEGRAM_API}/deleteWebhook`, { method: 'POST' });
-  } catch (e) {}
+    const dwRes = await fetch(`${TELEGRAM_API}/deleteWebhook`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+    const dwData = await dwRes.json();
+    console.log('Webhook deleted:', dwData.description || 'OK');
+  } catch (e) { console.error('Delete webhook error:', e.message); }
 
-  while (polling) {
+  while (true) {
     try {
-      const url = `${TELEGRAM_API}/getUpdates?offset=${lastUpdateId + 1}&timeout=30&allowed_updates=["message","callback_query"]`;
-      const res = await fetch(url);
+      const res = await fetch(`${TELEGRAM_API}/getUpdates`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          offset: lastUpdateId + 1,
+          timeout: 30,
+          allowed_updates: ['message', 'callback_query']
+        })
+      });
       const data = await res.json();
 
       if (!data.ok) {
@@ -119,12 +126,14 @@ async function pollTelegram() {
       }
 
       const updates = data.result || [];
+      if (updates.length > 0) console.log(`Received ${updates.length} update(s)`);
+      
       for (const update of updates) {
         if (update.update_id >= lastUpdateId) lastUpdateId = update.update_id;
         try {
           await handleUpdate(update);
         } catch (e) {
-          console.error('Handle update error:', e.message);
+          console.error('Handle update error:', e.message, e.stack);
         }
       }
     } catch (e) {
@@ -135,7 +144,7 @@ async function pollTelegram() {
 }
 
 async function handleUpdate(update) {
-  // Callback query (button press)
+  // Callback query
   if (update.callback_query) {
     const cb = update.callback_query;
     const data = cb.data || '';
@@ -151,7 +160,7 @@ async function handleUpdate(update) {
         const sock = io.sockets.sockets.get(pending.socketId);
         if (sock) sock.emit('room approved', { roomId: reqId, name: pending.name });
         io.emit('room list update', getRoomList());
-        await tgEdit(ADMIN_CHAT_ID, msgId, `✅ <b>Room Approved!</b>\n\n<b>${pending.name}</b>\nBy: ${pending.requestedBy}\n\nRoom is now live.`);
+        await tgEdit(ADMIN_CHAT_ID, msgId, `✅ <b>Room Approved!</b>\n\n<b>${pending.name}</b>\nBy: ${pending.requestedBy}`);
       }
     } else if (data.startsWith('reject_')) {
       const reqId = data.replace('reject_', '');
@@ -160,19 +169,19 @@ async function handleUpdate(update) {
         const sock = io.sockets.sockets.get(pending.socketId);
         if (sock) sock.emit('room rejected', { name: pending.name });
         delete pendingRequests[reqId];
-        await tgEdit(ADMIN_CHAT_ID, msgId, `❌ <b>Room Rejected</b>\n\n<b>${pending.name}</b>\nBy: ${pending.requestedBy}`);
+        await tgEdit(ADMIN_CHAT_ID, msgId, `❌ <b>Room Rejected</b>\n\n<b>${pending.name}</b>`);
       }
     } else if (data.startsWith('kick_')) {
-      const targetName = data.replace('kick_', '');
+      const name = data.replace('kick_', '');
       for (const [sid, sess] of Object.entries(sessions)) {
-        if (sess.name === targetName) { const sock = io.sockets.sockets.get(sid); if (sock) { sock.emit('kicked', { reason: 'Removed by admin' }); sock.disconnect(true); } }
+        if (sess.name === name) { const s = io.sockets.sockets.get(sid); if (s) { s.emit('kicked', { reason: 'Removed by admin' }); s.disconnect(true); } }
       }
-      bannedNames.add(targetName);
-      await tgEdit(ADMIN_CHAT_ID, msgId, `👢 <b>${targetName}</b> kicked & banned.`);
+      bannedNames.add(name);
+      await tgEdit(ADMIN_CHAT_ID, msgId, `👢 <b>${name}</b> kicked & banned.`);
     } else if (data.startsWith('close_')) {
       const roomId = data.replace('close_', '');
       if (rooms[roomId]) {
-        io.to(roomId).emit('system msg', { text: '⚠️ Room closed by Ghana Cyber.' });
+        io.to(roomId).emit('system msg', { text: '⚠️ Room closed.' });
         io.in(roomId).socketsLeave(roomId);
         delete rooms[roomId];
         io.emit('room list update', getRoomList());
@@ -186,32 +195,27 @@ async function handleUpdate(update) {
   const msg = update.message;
   const chatId = msg.chat.id;
   const text = msg.text || '';
-  const isAdmin = ADMIN_CHAT_ID && chatId === ADMIN_CHAT_ID;
+  const isAdmin = ADMIN_CHAT_ID && String(chatId) === String(ADMIN_CHAT_ID);
 
-  // /start
+  console.log(`Message from ${msg.from?.first_name} (id:${chatId}): ${text}`);
+
   if (text.startsWith('/start')) {
     ADMIN_CHAT_ID = chatId;
-    console.log(`Admin registered: ${chatId}`);
+    console.log(`✅ Admin registered: ${chatId}`);
     await sendAdminMenu(chatId);
     return;
   }
 
-  // If no admin registered yet, auto-register the first person who sends /start
-  if (!ADMIN_CHAT_ID) {
-    ADMIN_CHAT_ID = chatId;
-    console.log(`Auto-registered admin: ${chatId}`);
-    await sendAdminMenu(chatId);
-    return;
-  }
+  if (!ADMIN_CHAT_ID) { ADMIN_CHAT_ID = chatId; console.log(`Auto admin: ${chatId}`); await sendAdminMenu(chatId); return; }
 
   if (text === '/help' && isAdmin) {
     await tgSend(chatId,
       `<b>📖 Full Command List</b>\n\n` +
       `<b>📋 Rooms</b>\n/rooms — List all rooms\n/visitors — Who's online\n/close — Close a room\n\n` +
-      `<b>🤖 AI Auto-Reply</b>\n/aichat on — Activate AI bot\n/aichat off — Turn off AI\n/aichat status — Check status\n/aichat personality [text] — Set personality\n/aichat reset — Clear memory\n\n` +
-      `<b>💬 Messaging</b>\n/broadcast [msg] — Send to all\nReply to msg — Reply to that room\n(Plain text) — All rooms\n\n` +
-      `<b>👥 Users</b>\n/kick — Kick & ban (buttons)\n/unban [name] — Unban\n\n` +
-      `<b>📊 Stats</b>\n/stats — Statistics\n/status — Health check\n/menu — Quick menu`);
+      `<b>🤖 AI Auto-Reply</b>\n/aichat on — Activate AI\n/aichat off — Turn off AI\n/aichat status — Check status\n/aichat personality [text] — Set personality\n/aichat reset — Clear memory\n\n` +
+      `<b>💬 Messaging</b>\n/broadcast [msg] — Send to all\nReply to msg — Reply to room\n(Plain text) — All rooms\n\n` +
+      `<b>👥 Users</b>\n/kick — Kick & ban\n/unban [name] — Unban\n\n` +
+      `<b>📊 Stats</b>\n/stats — Statistics\n/status — Health\n/menu — Quick menu`);
     return;
   }
 
@@ -219,12 +223,12 @@ async function handleUpdate(update) {
 
   if (text.startsWith('/rooms') && isAdmin) {
     const list = Object.values(rooms).map(r => `• <b>${r.name}</b> — ${r.memberCount} online\n  ${r.description}`).join('\n\n');
-    await tgSend(chatId, `<b>📋 Active Rooms (${Object.keys(rooms).length})</b>\n\n${list || 'No rooms yet.'}`);
+    await tgSend(chatId, `<b>📋 Rooms (${Object.keys(rooms).length})</b>\n\n${list || 'None.'}`);
     return;
   }
 
   if (text.startsWith('/visitors') && isAdmin) {
-    const vis = Object.entries(sessions).map(([sid, s]) => { const room = s.roomId ? (rooms[s.roomId]?.name || 'Unknown') : 'Lobby'; return `• <b>${s.name}</b> — in ${room}`; });
+    const vis = Object.entries(sessions).map(([sid, s]) => { const rm = s.roomId ? (rooms[s.roomId]?.name || '?') : 'Lobby'; return `• <b>${s.name}</b> — ${rm}`; });
     await tgSend(chatId, `<b>👥 Online (${vis.length})</b>\n\n${vis.join('\n') || 'No one online.'}`);
     return;
   }
@@ -241,21 +245,21 @@ async function handleUpdate(update) {
     const parts = text.split(' '); const sub = parts[1] || '';
     if (sub === 'on') {
       aiMode = true;
-      await tgSend(chatId, `🤖 <b>AI Auto-Reply ON!</b>\n\nThe bot will auto-reply to all visitor messages.\n\nPersonality: <i>${aiPersonality.substring(0, 80)}...</i>`);
+      await tgSend(chatId, `🤖 <b>AI Auto-Reply ON!</b>\n\nBot will auto-reply to visitors.\n\nPersonality: <i>${aiPersonality.substring(0, 80)}...</i>`);
       io.emit('system msg', { text: '🤖 AI Assistant activated!' });
     } else if (sub === 'off') {
       aiMode = false;
-      await tgSend(chatId, `🔴 <b>AI Auto-Reply OFF.</b>`);
-      io.emit('system msg', { text: '💤 AI Assistant off. Ghana Cyber is back.' });
+      await tgSend(chatId, `🔴 <b>AI OFF.</b>`);
+      io.emit('system msg', { text: '💤 AI off. Ghana Cyber is back.' });
     } else if (sub === 'status') {
       await tgSend(chatId, `🤖 AI: ${aiMode ? '🟢 ON' : '🔴 OFF'}\nModel: Llama 3.3 70B\nMemories: ${Object.keys(aiConversations).length} room(s)`);
     } else if (sub === 'personality') {
       const np = text.replace('/aichat personality', '').trim();
-      if (np) { aiPersonality = np; Object.keys(aiConversations).forEach(k => delete aiConversations[k]); await tgSend(chatId, `✅ Personality updated!\n\n<i>${aiPersonality}</i>`); }
+      if (np) { aiPersonality = np; Object.keys(aiConversations).forEach(k => delete aiConversations[k]); await tgSend(chatId, `✅ Updated!\n\n<i>${aiPersonality}</i>`); }
       else { await tgSend(chatId, `Current:\n\n<i>${aiPersonality}</i>`); }
     } else if (sub === 'reset') {
       Object.keys(aiConversations).forEach(k => delete aiConversations[k]);
-      await tgSend(chatId, `🧹 AI memory cleared.`);
+      await tgSend(chatId, `🧹 Memory cleared.`);
     } else {
       await tgSend(chatId, `🤖 AI: ${aiMode ? '🟢 ON' : '🔴 OFF'}\n\n/aichat on | off | status | personality [text] | reset`);
     }
@@ -278,7 +282,7 @@ async function handleUpdate(update) {
   if (text === '/close' && isAdmin) {
     const rl = Object.values(rooms).filter(r => r.approved);
     if (!rl.length) { await tgSend(chatId, `No rooms.`); return; }
-    await tgSend(chatId, `<b>Close which room?</b>`, { reply_markup: { inline_keyboard: rl.map(r => [{ text: `🔒 ${r.name}`, callback_data: `close_${r.id}` }]) } });
+    await tgSend(chatId, `<b>Close which?</b>`, { reply_markup: { inline_keyboard: rl.map(r => [{ text: `🔒 ${r.name}`, callback_data: `close_${r.id}` }]) } });
     return;
   }
 
@@ -288,11 +292,10 @@ async function handleUpdate(update) {
   }
 
   if (text === '/status' && isAdmin) {
-    await tgSend(chatId, `🟢 <b>System OK</b>\n\nv3.2 | Bot: @Neverhidechatcampbot\nAI: ${aiMode ? 'Active' : 'Standby'}\nVisitors: ${Object.keys(sessions).length}\nRooms: ${Object.keys(rooms).length}`);
+    await tgSend(chatId, `🟢 <b>System OK</b>\n\nv3.2.1 | Bot: @Neverhidechatcampbot\nAI: ${aiMode ? 'Active' : 'Standby'}\nVisitors: ${Object.keys(sessions).length}\nRooms: ${Object.keys(rooms).length}`);
     return;
   }
 
-  // Admin plain text reply
   if (isAdmin && text && !text.startsWith('/')) {
     let targetRoomId = null;
     if (msg.reply_to_message) { const rid = msg.reply_to_message.message_id; if (pendingActions[rid]) targetRoomId = pendingActions[rid].roomId; }
@@ -313,11 +316,8 @@ async function sendAdminMenu(chatId) {
 // ===== EXPRESS =====
 app.use(express.json());
 app.use(express.static('public'));
-
-// Keep webhook endpoint for compatibility but polling is primary
 app.post('/webhook', async (req, res) => { try { await handleUpdate(req.body); } catch(e) {} res.json({ ok: true }); });
-
-app.get('/health', (req, res) => res.json({ status: 'ok', version: '3.2.0', rooms: Object.keys(rooms).length, visitors: Object.keys(sessions).length, aiMode, adminConnected: !!ADMIN_CHAT_ID, polling }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: '3.2.1', rooms: Object.keys(rooms).length, visitors: Object.keys(sessions).length, aiMode, adminConnected: !!ADMIN_CHAT_ID, polling: 'active' }));
 app.get('/api/rooms', (req, res) => res.json(getRoomList()));
 app.get('/', (req, res) => res.sendFile(__dirname + '/public/index.html'));
 
@@ -385,8 +385,11 @@ io.on('connection', (socket) => {
 
 // ===== START =====
 server.listen(PORT, () => {
-  console.log(`🚀 Never Hide Chat Camp v3.2 on port ${PORT}`);
+  console.log(`🚀 Never Hide Chat Camp v3.2.1 on port ${PORT}`);
   console.log(`Bot: ${BOT_TOKEN ? 'SET' : 'NOT SET'} | Groq: ${GROQ_API_KEY ? 'SET' : 'NOT SET'}`);
-  // Start long polling
-  if (BOT_TOKEN) pollTelegram();
+  if (BOT_TOKEN) {
+    pollTelegram().catch(e => console.error('Polling crashed:', e.message));
+  } else {
+    console.error('❌ No BOT_TOKEN set!');
+  }
 });
