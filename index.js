@@ -380,16 +380,8 @@ io.on('connection', (socket) => {
 });
 
 // ===== START =====
-server.listen(PORT, async () => {
+server.listen(PORT, () => {
   console.log(`🚀 Never Hide Chat Camp v3.0 on port ${PORT}`);
-  if (BOT_TOKEN) {
-    try {
-      const r = await fetch(`${TELEGRAM_API}/setWebhook`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: `https://never-hide-chat-camp.onrender.com/webhook`, allowed_updates: ['message', 'callback_query'] })
-      });
-      const d = await r.json();
-      console.log('Telegram webhook:', d.description || d.result);
-    } catch (e) { console.error('Webhook setup failed:', e.message); }
-  }
+  console.log(`Using bot token: ${BOT_TOKEN ? 'SET' : 'NOT SET'}`);
+  // NOTE: Webhook is managed externally — do NOT auto-set it here
 });
