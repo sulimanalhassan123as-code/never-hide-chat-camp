@@ -7,7 +7,7 @@ const { Server } = require("socket.io");
 const io = new Server(server, { maxHttpBufferSize: 2e6, pingTimeout: 60000 });
 const PORT = process.env.PORT || 3000;
 
-const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
+const BOT_TOKEN = process.env.CHAT_BOT_TOKEN || '';
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
 // ===== STATE =====
