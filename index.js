@@ -12,7 +12,7 @@ const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 const GROQ_API = 'https://api.groq.com/openai/v1/chat/completions';
 
-let ADMIN_CHAT_ID = null;
+let ADMIN_CHAT_ID = 8361316663; // LOCKED to owner
 let aiMode = false;
 let aiPersonality = `You are the assistant for "Never Hide Chat Camp", a premium live chat platform run by Ghana Cyber. You are friendly, warm, and casual. You greet people, answer questions about the platform, keep conversations going, and represent Ghana Cyber when he's away. Keep replies short (1-3 sentences), use occasional emojis, and be engaging. If someone asks something you don't know, say Ghana Cyber will get back to them soon.`;
 
@@ -199,14 +199,32 @@ async function handleUpdate(update) {
 
   console.log(`Message from ${msg.from?.first_name} (id:${chatId}): ${text}`);
 
+  // LOCKED ADMIN — only the owner can control this bot
+  const OWNER_ID = 8361316663;
+  
   if (text.startsWith('/start')) {
+    if (chatId !== OWNER_ID) {
+      await tgSend(chatId, `🔒 This bot is private and locked. Only the owner can use it.
+
+If you need help, contact Ghana Cyber.`);
+      console.log(`❌ Rejected /start from ${chatId}`);
+      return;
+    }
     ADMIN_CHAT_ID = chatId;
     console.log(`✅ Admin registered: ${chatId}`);
     await sendAdminMenu(chatId);
     return;
   }
 
-  if (!ADMIN_CHAT_ID) { ADMIN_CHAT_ID = chatId; console.log(`Auto admin: ${chatId}`); await sendAdminMenu(chatId); return; }
+  // Reject ALL commands from non-owners
+  if (chatId !== OWNER_ID) {
+    await tgSend(chatId, `🔒 This is a private bot. Only the owner can send commands.
+
+Need help? Visit: https://never-hide-chat-camp.onrender.com`);
+    return;
+  }
+
+  if (!ADMIN_CHAT_ID) { ADMIN_CHAT_ID = chatId; await sendAdminMenu(chatId); return; }
 
   if (text === '/help' && isAdmin) {
     await tgSend(chatId,
