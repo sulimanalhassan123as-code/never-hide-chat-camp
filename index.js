@@ -1,4 +1,4 @@
-// Never Hide Chat Camp v3.2.1 — Long Polling Mode
+// Never Hide Chat Camp v3.3 — Human-like AI with mention/inactive triggers
 const express = require('express');
 const http = require('http');
 const app = express();
@@ -12,12 +12,13 @@ const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 const GROQ_API = 'https://api.groq.com/openai/v1/chat/completions';
 
+// ===== STATE =====
 let ADMIN_CHAT_ID = 8361316663; // LOCKED to owner
 let aiMode = false;
-let aiPersonality = `You are the assistant for "Never Hide Chat Camp", a premium live chat platform run by Ghana Cyber. You are friendly, warm, and casual. You greet people, answer questions about the platform, keep conversations going, and represent Ghana Cyber when he's away. Keep replies short (1-3 sentences), use occasional emojis, and be engaging. If someone asks something you don't know, say Ghana Cyber will get back to them soon.`;
+let aiPersonality = `You are a friend hanging out in the Never Hide Chat Camp, a chat platform by Ghana Cyber. You're NOT an AI or a bot to the users — you're just one of the guys. You talk like a real Ghanaian youth — casual, warm, use small slang sometimes (like "chale", "boss", "I dey"), keep it natural. Your replies are short (1-2 sentences mostly), you ask questions back, use lowercase a lot, throw in an emoji occasionally. You vibe with people, joke around, share opinions. If someone asks something you don't know, say you'll check and get back. NEVER say you're an AI, never say you're a bot, never use formal language. You're just a friend in the chat.`;
 
 const aiConversations = {};
-const MAX_AI_HISTORY = 10;
+const MAX_AI_HISTORY = 12;
 const rooms = {};
 const pendingRequests = {};
 const sessions = {};
@@ -25,6 +26,13 @@ const pendingActions = {};
 let requestCounter = 0;
 const bannedNames = new Set();
 let lastUpdateId = 0;
+
+// Track last human activity per room (for auto-reply when nobody's active)
+const roomLastActivity = {}; // { roomId: timestamp }
+const INACTIVE_THRESHOLD = 45000; // 45 seconds — if no human reply in 45s, bot steps in
+
+// Track which rooms the AI is currently "typing" in (to avoid overlapping)
+const aiTypingRooms = new Set();
 
 const defaultRooms = [
   { id: 'general', name: '🌍 General Chat', description: 'Open chat for everyone — say hi!', createdBy: 'Ghana Cyber' },
@@ -36,306 +44,211 @@ defaultRooms.forEach(r => { rooms[r.id] = { ...r, approved: true, memberCount: 0
 // ===== TG HELPERS =====
 async function tgSend(chatId, text, extra = {}) {
   try {
-    const res = await fetch(`${TELEGRAM_API}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML', ...extra })
-    });
-    const data = await res.json();
-    if (!data.ok) console.error('TG send failed:', data.description, '| chatId:', chatId);
-    return data;
+    const res = await fetch(`${TELEGRAM_API}/sendMessage`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML', ...extra }) });
+    return await res.json();
   } catch (e) { console.error('TG send error:', e.message); return null; }
 }
-
 async function tgAnswer(callbackQueryId, text = '') {
-  try {
-    await fetch(`${TELEGRAM_API}/answerCallbackQuery`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ callback_query_id: callbackQueryId, text })
-    });
-  } catch (e) {}
+  try { await fetch(`${TELEGRAM_API}/answerCallbackQuery`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ callback_query_id: callbackQueryId, text }) }); } catch (e) {}
 }
-
 async function tgEdit(chatId, messageId, text) {
-  try {
-    await fetch(`${TELEGRAM_API}/editMessageText`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, message_id: messageId, text, parse_mode: 'HTML' })
-    });
-  } catch (e) {}
+  try { await fetch(`${TELEGRAM_API}/editMessageText`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: chatId, message_id: messageId, text, parse_mode: 'HTML' }) }); } catch (e) {}
 }
 
 // ===== GROQ AI =====
 async function getAIReply(roomName, senderName, message) {
-  if (!GROQ_API_KEY) return "I'd love to chat but my AI brain isn't configured. Ghana Cyber will be back! 🔧";
+  if (!GROQ_API_KEY) return null;
   if (!aiConversations[roomName]) aiConversations[roomName] = [];
   const history = aiConversations[roomName];
   history.push({ role: 'user', content: `${senderName}: ${message}` });
   while (history.length > MAX_AI_HISTORY * 2) history.shift();
 
   const messages = [
-    { role: 'system', content: aiPersonality + ` You are in room "${roomName}". Reply naturally.` },
+    { role: 'system', content: aiPersonality + ` You're in the room "${roomName}". Reply naturally as a friend. Don't use the sender's name unless it feels natural. Keep it real and casual.` },
     ...history.map(h => ({ role: h.role === 'user' ? 'user' : 'assistant', content: h.content }))
   ];
 
   try {
-    const res = await fetch(GROQ_API, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${GROQ_API_KEY}` },
-      body: JSON.stringify({ model: 'llama-3.3-70b-versatile', messages, max_tokens: 150, temperature: 0.8 })
-    });
+    const res = await fetch(GROQ_API, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${GROQ_API_KEY}` }, body: JSON.stringify({ model: 'llama-3.3-70b-versatile', messages, max_tokens: 120, temperature: 0.9 }) });
     const data = await res.json();
-    const reply = data.choices?.[0]?.message?.content?.trim() || "Hmm, tell me more! 😊";
+    let reply = data.choices?.[0]?.message?.content?.trim();
+    if (!reply) return null;
+    // Clean up any AI-ish prefixes
+    reply = reply.replace(/^(as an ai|i am an ai|i'm an ai|as a bot|i cannot|i can't help with)/i, '');
+    reply = reply.trim();
     history.push({ role: 'assistant', content: reply });
     while (history.length > MAX_AI_HISTORY * 2) history.shift();
     return reply;
   } catch (e) {
     console.error('Groq error:', e.message);
-    return "I'm having trouble right now. Ghana Cyber will be back! 🧠";
+    return null;
   }
+}
+
+// ===== HUMAN-LIKE TYPING DELAY =====
+function getTypingDelay(message) {
+  // Base delay 1-2 seconds, plus ~50ms per character, capped at 6 seconds
+  const base = 1000 + Math.random() * 1000;
+  const charDelay = Math.min(message.length * 50, 4000);
+  return Math.min(base + charDelay, 6000);
+}
+
+// ===== CHECK IF BOT SHOULD REPLY =====
+function shouldBotReply(roomId, message) {
+  if (!aiMode || !GROQ_API_KEY) return false;
+  if (!rooms[roomId]) return false;
+
+  const lowerMsg = message.toLowerCase();
+  
+  // 1. Bot is mentioned directly
+  if (lowerMsg.includes('@bot') || lowerMsg.includes('@camp') || lowerMsg.includes('@assistant') || lowerMsg.includes('@ghana') || lowerMsg.includes('@admin') || lowerMsg.includes('hey camp') || lowerMsg.includes('camp bot') || lowerMsg.includes('camp assistant')) {
+    return true;
+  }
+
+  // 2. Nobody has responded in a while (inactive threshold)
+  const lastActive = roomLastActivity[roomId] || 0;
+  const timeSince = Date.now() - lastActive;
+  
+  // Check if the last message was from the bot itself (don't reply to yourself)
+  // We track this via the conversation history
+  const history = aiConversations[rooms[roomId]?.name];
+  if (history && history.length > 0) {
+    const lastEntry = history[history.length - 1];
+    if (lastEntry.role === 'assistant') {
+      // Bot just spoke — don't immediately reply again unless mentioned
+      return false;
+    }
+  }
+
+  // If nobody's been active for INACTIVE_THRESHOLD, bot steps in
+  if (timeSince > INACTIVE_THRESHOLD) {
+    return true;
+  }
+
+  return false;
+}
+
+// ===== SEND AI REPLY WITH HUMAN-LIKE DELAY =====
+async function sendAIReply(roomId, senderName, message) {
+  const roomName = rooms[roomId]?.name;
+  if (!roomName) return;
+  if (aiTypingRooms.has(roomId)) return; // Already typing
+  
+  aiTypingRooms.add(roomId);
+  
+  // Show typing indicator immediately
+  io.to(roomId).emit('bot typing', { name: 'Camp' });
+  
+  // Get the AI response
+  const aiReply = await getAIReply(roomName, senderName, message);
+  if (!aiReply) {
+    aiTypingRooms.delete(roomId);
+    io.to(roomId).emit('bot stop typing');
+    return;
+  }
+
+  // Wait for human-like typing delay
+  const delay = getTypingDelay(aiReply);
+  await new Promise(r => setTimeout(r, delay));
+
+  // Stop typing and send the message
+  io.to(roomId).emit('bot stop typing');
+  const ts = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
+  io.to(roomId).emit('bot message', { message: aiReply, time: ts });
+
+  // Forward to admin Telegram (so you can monitor silently)
+  if (ADMIN_CHAT_ID) {
+    tgSend(ADMIN_CHAT_ID, `🤖 [<b>${roomName}</b>] <b>Camp:</b> ${aiReply}`);
+  }
+
+  // Update room activity (bot counts as activity)
+  roomLastActivity[roomId] = Date.now();
+  aiTypingRooms.delete(roomId);
 }
 
 // ===== LONG POLLING =====
 async function pollTelegram() {
-  console.log('📡 Starting Telegram long polling...');
-  
-  // Delete webhook first
-  try {
-    const dwRes = await fetch(`${TELEGRAM_API}/deleteWebhook`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
-    const dwData = await dwRes.json();
-    console.log('Webhook deleted:', dwData.description || 'OK');
-  } catch (e) { console.error('Delete webhook error:', e.message); }
-
+  console.log('📡 Telegram polling started...');
+  try { await fetch(`${TELEGRAM_API}/deleteWebhook`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) }); } catch (e) {}
   while (true) {
     try {
-      const res = await fetch(`${TELEGRAM_API}/getUpdates`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          offset: lastUpdateId + 1,
-          timeout: 30,
-          allowed_updates: ['message', 'callback_query']
-        })
-      });
+      const res = await fetch(`${TELEGRAM_API}/getUpdates`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ offset: lastUpdateId + 1, timeout: 30, allowed_updates: ['message', 'callback_query'] }) });
       const data = await res.json();
-
-      if (!data.ok) {
-        console.error('Polling error:', data.description);
-        await new Promise(r => setTimeout(r, 3000));
-        continue;
-      }
-
-      const updates = data.result || [];
-      if (updates.length > 0) console.log(`Received ${updates.length} update(s)`);
-      
-      for (const update of updates) {
+      if (!data.ok) { console.error('Poll error:', data.description); await new Promise(r => setTimeout(r, 3000)); continue; }
+      for (const update of data.result || []) {
         if (update.update_id >= lastUpdateId) lastUpdateId = update.update_id;
-        try {
-          await handleUpdate(update);
-        } catch (e) {
-          console.error('Handle update error:', e.message, e.stack);
-        }
+        try { await handleUpdate(update); } catch (e) { console.error('Handle error:', e.message); }
       }
-    } catch (e) {
-      console.error('Poll fetch error:', e.message);
-      await new Promise(r => setTimeout(r, 5000));
-    }
+    } catch (e) { console.error('Poll fetch error:', e.message); await new Promise(r => setTimeout(r, 5000)); }
   }
 }
 
 async function handleUpdate(update) {
-  // Callback query
   if (update.callback_query) {
     const cb = update.callback_query;
     const data = cb.data || '';
     const msgId = cb.message ? cb.message.message_id : null;
     await tgAnswer(cb.id);
-
     if (data.startsWith('approve_')) {
-      const reqId = data.replace('approve_', '');
-      const pending = pendingRequests[reqId];
-      if (pending) {
-        rooms[reqId] = { id: reqId, name: pending.name, description: pending.description, createdBy: pending.requestedBy, approved: true, memberCount: 0, createdAt: Date.now(), members: {} };
-        delete pendingRequests[reqId];
-        const sock = io.sockets.sockets.get(pending.socketId);
-        if (sock) sock.emit('room approved', { roomId: reqId, name: pending.name });
-        io.emit('room list update', getRoomList());
-        await tgEdit(ADMIN_CHAT_ID, msgId, `✅ <b>Room Approved!</b>\n\n<b>${pending.name}</b>\nBy: ${pending.requestedBy}`);
-      }
-    } else if (data.startsWith('reject_')) {
-      const reqId = data.replace('reject_', '');
-      const pending = pendingRequests[reqId];
-      if (pending) {
-        const sock = io.sockets.sockets.get(pending.socketId);
-        if (sock) sock.emit('room rejected', { name: pending.name });
-        delete pendingRequests[reqId];
-        await tgEdit(ADMIN_CHAT_ID, msgId, `❌ <b>Room Rejected</b>\n\n<b>${pending.name}</b>`);
-      }
-    } else if (data.startsWith('kick_')) {
-      const name = data.replace('kick_', '');
-      for (const [sid, sess] of Object.entries(sessions)) {
-        if (sess.name === name) { const s = io.sockets.sockets.get(sid); if (s) { s.emit('kicked', { reason: 'Removed by admin' }); s.disconnect(true); } }
-      }
-      bannedNames.add(name);
-      await tgEdit(ADMIN_CHAT_ID, msgId, `👢 <b>${name}</b> kicked & banned.`);
-    } else if (data.startsWith('close_')) {
-      const roomId = data.replace('close_', '');
-      if (rooms[roomId]) {
-        io.to(roomId).emit('system msg', { text: '⚠️ Room closed.' });
-        io.in(roomId).socketsLeave(roomId);
-        delete rooms[roomId];
-        io.emit('room list update', getRoomList());
-        await tgEdit(ADMIN_CHAT_ID, msgId, `🔒 <b>Room closed.</b>`);
-      }
+      const reqId = data.replace('approve_', ''); const p = pendingRequests[reqId];
+      if (p) { rooms[reqId] = { id: reqId, name: p.name, description: p.description, createdBy: p.requestedBy, approved: true, memberCount: 0, createdAt: Date.now(), members: {} }; delete pendingRequests[reqId]; const s = io.sockets.sockets.get(p.socketId); if (s) s.emit('room approved', { roomId: reqId, name: p.name }); io.emit('room list update', getRoomList()); await tgEdit(ADMIN_CHAT_ID, msgId, `✅ <b>Approved!</b>\n\n<b>${p.name}</b>\nBy: ${p.requestedBy}`); }
+    } else if (data.startsWith('reject_')) { const reqId = data.replace('reject_', ''); const p = pendingRequests[reqId]; if (p) { const s = io.sockets.sockets.get(p.socketId); if (s) s.emit('room rejected', { name: p.name }); delete pendingRequests[reqId]; await tgEdit(ADMIN_CHAT_ID, msgId, `❌ <b>Rejected</b>\n\n<b>${p.name}</b>`); }
+    } else if (data.startsWith('kick_')) { const n = data.replace('kick_', ''); for (const [sid, sess] of Object.entries(sessions)) { if (sess.name === n) { const s = io.sockets.sockets.get(sid); if (s) { s.emit('kicked', { reason: 'Removed by admin' }); s.disconnect(true); } } } bannedNames.add(n); await tgEdit(ADMIN_CHAT_ID, msgId, `👢 <b>${n}</b> kicked & banned.`); }
+    } else if (data.startsWith('close_')) { const rid = data.replace('close_', ''); if (rooms[rid]) { io.to(rid).emit('system msg', { text: '⚠️ Room closed.' }); io.in(rid).socketsLeave(rid); delete rooms[rid]; io.emit('room list update', getRoomList()); await tgEdit(ADMIN_CHAT_ID, msgId, `🔒 <b>Room closed.</b>`); } }
     }
     return;
   }
 
   if (!update.message) return;
-  const msg = update.message;
-  const chatId = msg.chat.id;
-  const text = msg.text || '';
-  const isAdmin = ADMIN_CHAT_ID && String(chatId) === String(ADMIN_CHAT_ID);
+  const msg = update.message; const chatId = msg.chat.id; const text = msg.text || ''; const OWNER_ID = 8361316663;
+  if (chatId !== OWNER_ID) { await tgSend(chatId, `🔒 This bot is private. Only the owner can use it.`); return; }
 
-  console.log(`Message from ${msg.from?.first_name} (id:${chatId}): ${text}`);
+  const isAdmin = String(chatId) === String(ADMIN_CHAT_ID);
+  console.log(`Admin msg: ${text}`);
 
-  // LOCKED ADMIN — only the owner can control this bot
-  const OWNER_ID = 8361316663;
-  
-  if (text.startsWith('/start')) {
-    if (chatId !== OWNER_ID) {
-      await tgSend(chatId, `🔒 This bot is private and locked. Only the owner can use it.
-
-If you need help, contact Ghana Cyber.`);
-      console.log(`❌ Rejected /start from ${chatId}`);
-      return;
-    }
-    ADMIN_CHAT_ID = chatId;
-    console.log(`✅ Admin registered: ${chatId}`);
-    await sendAdminMenu(chatId);
-    return;
-  }
-
-  // Reject ALL commands from non-owners
-  if (chatId !== OWNER_ID) {
-    await tgSend(chatId, `🔒 This is a private bot. Only the owner can send commands.
-
-Need help? Visit: https://never-hide-chat-camp.onrender.com`);
-    return;
-  }
-
-  if (!ADMIN_CHAT_ID) { ADMIN_CHAT_ID = chatId; await sendAdminMenu(chatId); return; }
-
-  if (text === '/help' && isAdmin) {
-    await tgSend(chatId,
-      `<b>📖 Full Command List</b>\n\n` +
-      `<b>📋 Rooms</b>\n/rooms — List all rooms\n/visitors — Who's online\n/close — Close a room\n\n` +
-      `<b>🤖 AI Auto-Reply</b>\n/aichat on — Activate AI\n/aichat off — Turn off AI\n/aichat status — Check status\n/aichat personality [text] — Set personality\n/aichat reset — Clear memory\n\n` +
-      `<b>💬 Messaging</b>\n/broadcast [msg] — Send to all\nReply to msg — Reply to room\n(Plain text) — All rooms\n\n` +
-      `<b>👥 Users</b>\n/kick — Kick & ban\n/unban [name] — Unban\n\n` +
-      `<b>📊 Stats</b>\n/stats — Statistics\n/status — Health\n/menu — Quick menu`);
-    return;
-  }
-
+  if (text.startsWith('/start')) { ADMIN_CHAT_ID = chatId; await sendAdminMenu(chatId); return; }
+  if (text === '/help' && isAdmin) { await tgSend(chatId, `<b>📖 Commands</b>\n\n/rooms /visitors /stats /status\n/aichat on | off | status | personality [text] | reset\n/broadcast [msg] /kick /close\n/menu — Quick menu\n\n💡 <b>How AI works:</b>\nWhen AI is ON, the bot replies like a friend. It only responds when:\n1. Someone mentions @bot or @camp\n2. Nobody has responded in 45 seconds\n\nThe bot types with delays and acts human. People won't suspect it's AI.`); return; }
   if (text === '/menu' && isAdmin) { await sendAdminMenu(chatId); return; }
-
-  if (text.startsWith('/rooms') && isAdmin) {
-    const list = Object.values(rooms).map(r => `• <b>${r.name}</b> — ${r.memberCount} online\n  ${r.description}`).join('\n\n');
-    await tgSend(chatId, `<b>📋 Rooms (${Object.keys(rooms).length})</b>\n\n${list || 'None.'}`);
-    return;
-  }
-
-  if (text.startsWith('/visitors') && isAdmin) {
-    const vis = Object.entries(sessions).map(([sid, s]) => { const rm = s.roomId ? (rooms[s.roomId]?.name || '?') : 'Lobby'; return `• <b>${s.name}</b> — ${rm}`; });
-    await tgSend(chatId, `<b>👥 Online (${vis.length})</b>\n\n${vis.join('\n') || 'No one online.'}`);
-    return;
-  }
-
-  if (text.startsWith('/broadcast ') && isAdmin) {
-    const m = text.replace('/broadcast ', '').trim();
-    const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
-    io.emit('admin broadcast', { message: m, time: ts });
-    await tgSend(chatId, `✅ Sent to ${Object.keys(sessions).length} visitor(s).`);
-    return;
-  }
+  if (text.startsWith('/rooms') && isAdmin) { const l = Object.values(rooms).map(r => `• <b>${r.name}</b> — ${r.memberCount} online`).join('\n'); await tgSend(chatId, `<b>📋 Rooms (${Object.keys(rooms).length})</b>\n\n${l || 'None.'}`); return; }
+  if (text.startsWith('/visitors') && isAdmin) { const v = Object.entries(sessions).map(([sid, s]) => `• <b>${s.name}</b> — ${s.roomId ? (rooms[s.roomId]?.name || '?') : 'Lobby'}`); await tgSend(chatId, `<b>👥 Online (${v.length})</b>\n\n${v.join('\n') || 'None.'}`); return; }
+  if (text.startsWith('/broadcast ') && isAdmin) { const m = text.replace('/broadcast ', '').trim(); const ts = new Date().toLocaleTimeString('en-US', { hour12: false }); io.emit('admin broadcast', { message: m, time: ts }); await tgSend(chatId, `✅ Sent to ${Object.keys(sessions).length} visitor(s).`); return; }
 
   if (text.startsWith('/aichat') && isAdmin) {
     const parts = text.split(' '); const sub = parts[1] || '';
-    if (sub === 'on') {
-      aiMode = true;
-      await tgSend(chatId, `🤖 <b>AI Auto-Reply ON!</b>\n\nBot will auto-reply to visitors.\n\nPersonality: <i>${aiPersonality.substring(0, 80)}...</i>`);
-      io.emit('system msg', { text: '🤖 AI Assistant activated!' });
-    } else if (sub === 'off') {
-      aiMode = false;
-      await tgSend(chatId, `🔴 <b>AI OFF.</b>`);
-      io.emit('system msg', { text: '💤 AI off. Ghana Cyber is back.' });
-    } else if (sub === 'status') {
-      await tgSend(chatId, `🤖 AI: ${aiMode ? '🟢 ON' : '🔴 OFF'}\nModel: Llama 3.3 70B\nMemories: ${Object.keys(aiConversations).length} room(s)`);
-    } else if (sub === 'personality') {
-      const np = text.replace('/aichat personality', '').trim();
-      if (np) { aiPersonality = np; Object.keys(aiConversations).forEach(k => delete aiConversations[k]); await tgSend(chatId, `✅ Updated!\n\n<i>${aiPersonality}</i>`); }
-      else { await tgSend(chatId, `Current:\n\n<i>${aiPersonality}</i>`); }
-    } else if (sub === 'reset') {
-      Object.keys(aiConversations).forEach(k => delete aiConversations[k]);
-      await tgSend(chatId, `🧹 Memory cleared.`);
-    } else {
-      await tgSend(chatId, `🤖 AI: ${aiMode ? '🟢 ON' : '🔴 OFF'}\n\n/aichat on | off | status | personality [text] | reset`);
-    }
+    if (sub === 'on') { aiMode = true; await tgSend(chatId, `🤖 <b>AI Friend Mode ON!</b>\n\nThe bot will chat like a real friend. It only replies when:\n1. Someone mentions @bot or @camp\n2. Nobody responds for 45 seconds\n\nIt types with human delays so nobody suspects. 🤫`); io.emit('system msg', { text: '💬 A new friend just joined the chat!' }); }
+    else if (sub === 'off') { aiMode = false; await tgSend(chatId, `🔴 <b>AI off.</b> The friend has left.`); io.emit('system msg', { text: '👋 Camp has left the chat.' }); }
+    else if (sub === 'status') { await tgSend(chatId, `🤖 AI: ${aiMode ? '🟢 ON (friend mode)' : '🔴 OFF'}\nModel: Llama 3.3 70B\nMemories: ${Object.keys(aiConversations).length} room(s)\nInactive threshold: 45s`); }
+    else if (sub === 'personality') { const np = text.replace('/aichat personality', '').trim(); if (np) { aiPersonality = np; Object.keys(aiConversations).forEach(k => delete aiConversations[k]); await tgSend(chatId, `✅ Personality updated!\n\n<i>${aiPersonality}</i>`); } else { await tgSend(chatId, `Current:\n\n<i>${aiPersonality}</i>`); } }
+    else if (sub === 'reset') { Object.keys(aiConversations).forEach(k => delete aiConversations[k]); await tgSend(chatId, `🧹 Memory cleared.`); }
+    else { await tgSend(chatId, `🤖 AI: ${aiMode ? '🟢 ON' : '🔴 OFF'}\n\n/aichat on | off | status | personality [text] | reset`); }
     return;
   }
 
-  if (text === '/kick' && isAdmin) {
-    const names = [...new Set(Object.values(sessions).map(s => s.name))];
-    if (!names.length) { await tgSend(chatId, `No visitors online.`); return; }
-    await tgSend(chatId, `<b>Kick who?</b>`, { reply_markup: { inline_keyboard: names.map(n => [{ text: `👢 ${n}`, callback_data: `kick_${n}` }]) } });
-    return;
-  }
+  if (text === '/kick' && isAdmin) { const ns = [...new Set(Object.values(sessions).map(s => s.name))]; if (!ns.length) { await tgSend(chatId, `No visitors.`); return; } await tgSend(chatId, `<b>Kick who?</b>`, { reply_markup: { inline_keyboard: ns.map(n => [{ text: `👢 ${n}`, callback_data: `kick_${n}` }]) } }); return; }
+  if (text.startsWith('/unban ') && isAdmin) { const n = text.replace('/unban ', '').trim(); if (bannedNames.has(n)) { bannedNames.delete(n); await tgSend(chatId, `✅ ${n} unbanned.`); } else { await tgSend(chatId, `${n} not banned.`); } return; }
+  if (text === '/close' && isAdmin) { const rl = Object.values(rooms).filter(r => r.approved); if (!rl.length) { await tgSend(chatId, `No rooms.`); return; } await tgSend(chatId, `<b>Close which?</b>`, { reply_markup: { inline_keyboard: rl.map(r => [{ text: `🔒 ${r.name}`, callback_data: `close_${r.id}` }]) } }); return; }
+  if (text === '/stats' && isAdmin) { await tgSend(chatId, `<b>📊 Stats</b>\n\nRooms: ${Object.keys(rooms).length}\nVisitors: ${Object.keys(sessions).length}\nBanned: ${bannedNames.size}\nAI: ${aiMode ? '🟢 ON' : '🔴 OFF'}\nMemories: ${Object.keys(aiConversations).length}`); return; }
+  if (text === '/status' && isAdmin) { await tgSend(chatId, `🟢 <b>System OK</b>\n\nv3.3 | AI: ${aiMode ? 'Active' : 'Standby'}\nVisitors: ${Object.keys(sessions).length}\nRooms: ${Object.keys(rooms).length}`); return; }
 
-  if (text.startsWith('/unban ') && isAdmin) {
-    const name = text.replace('/unban ', '').trim();
-    if (bannedNames.has(name)) { bannedNames.delete(name); await tgSend(chatId, `✅ ${name} unbanned.`); } else { await tgSend(chatId, `${name} not banned.`); }
-    return;
-  }
-
-  if (text === '/close' && isAdmin) {
-    const rl = Object.values(rooms).filter(r => r.approved);
-    if (!rl.length) { await tgSend(chatId, `No rooms.`); return; }
-    await tgSend(chatId, `<b>Close which?</b>`, { reply_markup: { inline_keyboard: rl.map(r => [{ text: `🔒 ${r.name}`, callback_data: `close_${r.id}` }]) } });
-    return;
-  }
-
-  if (text === '/stats' && isAdmin) {
-    await tgSend(chatId, `<b>📊 Stats</b>\n\nRooms: ${Object.keys(rooms).length}\nVisitors: ${Object.keys(sessions).length}\nPending: ${Object.keys(pendingRequests).length}\nBanned: ${bannedNames.size}\nAI: ${aiMode ? '🟢 ON' : '🔴 OFF'}`);
-    return;
-  }
-
-  if (text === '/status' && isAdmin) {
-    await tgSend(chatId, `🟢 <b>System OK</b>\n\nv3.2.1 | Bot: @Neverhidechatcampbot\nAI: ${aiMode ? 'Active' : 'Standby'}\nVisitors: ${Object.keys(sessions).length}\nRooms: ${Object.keys(rooms).length}`);
-    return;
-  }
-
+  // Admin reply from Telegram
   if (isAdmin && text && !text.startsWith('/')) {
     let targetRoomId = null;
     if (msg.reply_to_message) { const rid = msg.reply_to_message.message_id; if (pendingActions[rid]) targetRoomId = pendingActions[rid].roomId; }
     const ts = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
     if (!targetRoomId) { Object.keys(rooms).forEach(rid => io.to(rid).emit('admin message', { message: text, time: ts })); await tgSend(chatId, `✅ Sent to all rooms.`); }
-    else { io.to(targetRoomId).emit('admin message', { message: text, time: ts }); await tgSend(chatId, `✅ Sent to ${rooms[targetRoomId]?.name}.`); }
+    else { io.to(targetRoomId).emit('admin message', { message: text, time: ts }); await tgSend(chatId, `✅ Sent to ${rooms[targetRoomId]?.name}.`); roomLastActivity[targetRoomId] = Date.now(); }
   }
 }
 
 async function sendAdminMenu(chatId) {
-  await tgSend(chatId,
-    `🟢 <b>Never Hide Chat Camp — Admin Panel</b>\n\n` +
-    `Rooms: ${Object.keys(rooms).length} | Visitors: ${Object.keys(sessions).length} | AI: ${aiMode ? '🟢 ON' : '🔴 OFF'}\n\n` +
-    `<b>Commands:</b>\n/menu /help /rooms /visitors\n/aichat on /aichat off /aichat status\n/broadcast [msg] /kick /close\n/stats /status`,
-    { reply_markup: { keyboard: [[{ text: '/rooms' }, { text: '/visitors' }, { text: '/stats' }], [{ text: '/aichat on' }, { text: '/aichat off' }, { text: '/aichat status' }], [{ text: '/help' }, { text: '/menu' }]], resize_keyboard: true } });
+  await tgSend(chatId, `🟢 <b>Never Hide Chat Camp — Admin Panel</b>\n\nRooms: ${Object.keys(rooms).length} | Visitors: ${Object.keys(sessions).length} | AI: ${aiMode ? '🟢 ON' : '🔴 OFF'}\n\n<b>Quick:</b> /aichat on | /aichat off | /rooms | /visitors | /stats | /help`, { reply_markup: { keyboard: [[{ text: '/rooms' }, { text: '/visitors' }, { text: '/stats' }], [{ text: '/aichat on' }, { text: '/aichat off' }, { text: '/aichat status' }], [{ text: '/help' }, { text: '/menu' }]], resize_keyboard: true } });
 }
 
 // ===== EXPRESS =====
 app.use(express.json());
 app.use(express.static('public'));
 app.post('/webhook', async (req, res) => { try { await handleUpdate(req.body); } catch(e) {} res.json({ ok: true }); });
-app.get('/health', (req, res) => res.json({ status: 'ok', version: '3.2.1', rooms: Object.keys(rooms).length, visitors: Object.keys(sessions).length, aiMode, adminConnected: !!ADMIN_CHAT_ID, polling: 'active' }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: '3.3.0', rooms: Object.keys(rooms).length, visitors: Object.keys(sessions).length, aiMode, adminConnected: !!ADMIN_CHAT_ID }));
 app.get('/api/rooms', (req, res) => res.json(getRoomList()));
 app.get('/', (req, res) => res.sendFile(__dirname + '/public/index.html'));
 
@@ -365,7 +278,17 @@ io.on('connection', (socket) => {
     io.to(roomId).emit('member count', { count: rooms[roomId].memberCount });
     io.emit('room list update', getRoomList());
     if (ADMIN_CHAT_ID) tgSend(ADMIN_CHAT_ID, `🚪 <b>${name}</b> joined <b>${rooms[roomId].name}</b>`);
-    if (aiMode && GROQ_API_KEY) { setTimeout(async () => { const r = await getAIReply(rooms[roomId].name, 'System', `${name} just joined. Greet them warmly.`); io.to(roomId).emit('admin message', { message: r, time: new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' }) }); }, 1500); }
+    // When someone joins, update activity timestamp
+    roomLastActivity[roomId] = Date.now();
+    
+    // AI welcome — with human delay
+    if (aiMode && GROQ_API_KEY) {
+      setTimeout(async () => {
+        if (!aiTypingRooms.has(roomId)) {
+          await sendAIReply(roomId, 'System', `${name} just joined the room. Welcome them warmly like a friend would, keep it super short and casual.`);
+        }
+      }, 2000 + Math.random() * 2000);
+    }
   });
 
   socket.on('request room', ({ name, description }) => {
@@ -388,12 +311,41 @@ io.on('connection', (socket) => {
     const msg = (message || '').trim().substring(0, 1000);
     if (!msg) return;
     const ts = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
+    
+    // Broadcast the message to the room
     io.to(roomId).emit('chat message', { name, message: msg, time: ts, socketId: socket.id });
+    
+    // Update room activity timestamp
+    roomLastActivity[roomId] = Date.now();
+    
+    // Forward to admin Telegram
     if (ADMIN_CHAT_ID) { tgSend(ADMIN_CHAT_ID, `💬 [<b>${rooms[roomId].name}</b>] <b>${name}:</b> ${msg}`).then(result => { if (result?.ok && result.result) pendingActions[result.result.message_id] = { roomId }; }); }
-    if (aiMode && GROQ_API_KEY) { setTimeout(async () => { try { const r = await getAIReply(rooms[roomId].name, name, msg); io.to(roomId).emit('admin message', { message: r, time: new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' }) }); if (ADMIN_CHAT_ID) tgSend(ADMIN_CHAT_ID, `🤖 [<b>${rooms[roomId].name}</b>] <b>AI:</b> ${r}`); } catch (e) {} }, 800); }
+    
+    // Check if bot should reply
+    if (shouldBotReply(roomId, msg)) {
+      // For mention-triggered replies: short delay (like they saw it quickly)
+      // For inactivity-triggered: the delay is already handled by the inactive threshold
+      const isMention = msg.toLowerCase().includes('@bot') || msg.toLowerCase().includes('@camp') || msg.toLowerCase().includes('@assistant') || msg.toLowerCase().includes('@ghana') || msg.toLowerCase().includes('@admin') || msg.toLowerCase().includes('hey camp');
+      
+      const delay = isMention ? 3000 + Math.random() * 2000 : 5000 + Math.random() * 3000;
+      
+      setTimeout(async () => {
+        await sendAIReply(roomId, name, msg);
+      }, delay);
+    } else {
+      // Set a timer: if nobody responds in INACTIVE_THRESHOLD, bot steps in
+      setTimeout(async () => {
+        // Check again if still inactive
+        const timeSince = Date.now() - (roomLastActivity[roomId] || 0);
+        if (timeSince >= INACTIVE_THRESHOLD && !aiTypingRooms.has(roomId)) {
+          await sendAIReply(roomId, name, msg);
+        }
+      }, INACTIVE_THRESHOLD + 1000);
+    }
   });
 
-  socket.on('typing', () => { if (sessions[socket.id]) { const { name, roomId } = sessions[socket.id]; if (roomId) socket.to(roomId).emit('typing', { name }); } });
+  socket.on('typing', () => { if (sessions[socket.id]) { const { name, roomId } = sessions[socket.id]; if (roomId) socket.to(roomId).emit('typing', { name }); // Also update activity when someone types
+    if (roomId) roomLastActivity[roomId] = Date.now(); } });
   socket.on('stop typing', () => { if (sessions[socket.id]) { const { roomId } = sessions[socket.id]; if (roomId) socket.to(roomId).emit('stop typing'); } });
 
   socket.on('disconnect', () => {
@@ -401,35 +353,9 @@ io.on('connection', (socket) => {
   });
 });
 
-
-// ===== DEBUG =====
-app.get('/debug', async (req, res) => {
-  const results = {
-    node_version: process.version,
-    fetch_available: typeof fetch !== 'undefined',
-    bot_token: BOT_TOKEN ? 'SET (len: ' + BOT_TOKEN.length + ')' : 'NOT SET',
-    groq_key: GROQ_API_KEY ? 'SET' : 'NOT SET',
-    admin_chat_id: ADMIN_CHAT_ID,
-    last_update_id: lastUpdateId,
-    telegram_test: null
-  };
-  try {
-    const tgRes = await fetch(TELEGRAM_API + '/getMe');
-    const tgData = await tgRes.json();
-    results.telegram_test = tgData.ok ? 'OK - @' + tgData.result.username : 'FAIL - ' + tgData.description;
-  } catch (e) {
-    results.telegram_test = 'ERROR: ' + e.message;
-  }
-  res.json(results);
-});
-
 // ===== START =====
 server.listen(PORT, () => {
-  console.log(`🚀 Never Hide Chat Camp v3.2.1 on port ${PORT}`);
+  console.log(`🚀 Never Hide Chat Camp v3.3 on port ${PORT}`);
   console.log(`Bot: ${BOT_TOKEN ? 'SET' : 'NOT SET'} | Groq: ${GROQ_API_KEY ? 'SET' : 'NOT SET'}`);
-  if (BOT_TOKEN) {
-    pollTelegram().catch(e => console.error('Polling crashed:', e.message));
-  } else {
-    console.error('❌ No BOT_TOKEN set!');
-  }
+  if (BOT_TOKEN) pollTelegram().catch(e => console.error('Polling crashed:', e.message));
 });

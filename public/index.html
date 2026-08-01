@@ -412,6 +412,7 @@
         <h3 id="chat-room-name">Room Name</h3>
         <p id="chat-room-desc">Description</p>
       </div>
+      <div style="font-size:10px;color:var(--text3);margin-top:2px;white-space:nowrap;">💬 mention @camp to chat with Camp</div>
       <div class="online-pill">
         <span class="dot"></span>
         <span id="online-count">0</span> online
@@ -670,18 +671,34 @@
 
   socket.on('system msg', ({ text }) => addMsg('system', text));
 
+  // Admin (Ghana Cyber) messages — shows with crown
   socket.on('admin message', ({ message, time }) => {
     addMsg('admin', message, time, '👑 Ghana Cyber');
   });
 
+  // Bot messages — looks like a regular user named "Camp"
+  socket.on('bot message', ({ message, time }) => {
+    addMsg('bot', message, time, 'Camp');
+  });
+
+  // Admin broadcast
   socket.on('admin broadcast', ({ message, time }) => {
     addMsg('broadcast', '📢 ' + message, time, null);
   });
 
+  // Human typing indicators
   socket.on('typing', ({ name }) => {
     document.getElementById('typing-indicator').textContent = name + ' is typing…';
   });
   socket.on('stop typing', () => {
+    document.getElementById('typing-indicator').textContent = '';
+  });
+
+  // Bot typing indicator — shows "Camp is typing…" but same as a regular user
+  socket.on('bot typing', ({ name }) => {
+    document.getElementById('typing-indicator').textContent = (name || 'Camp') + ' is typing…';
+  });
+  socket.on('bot stop typing', () => {
     document.getElementById('typing-indicator').textContent = '';
   });
 
